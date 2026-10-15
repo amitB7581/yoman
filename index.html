@@ -8,6 +8,9 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="סופר יומן">
 <link rel="manifest" href="manifest.webmanifest">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
 <title>סופר יומן</title>
@@ -226,8 +229,18 @@ td.chkcell{text-align:center;vertical-align:middle}
     <button class="pill" id="backupBtn">⬇️ גיבוי היומן</button>
     <label class="pill" for="restore">⬆️ שחזור מגיבוי</label>
     <input type="file" id="restore" accept=".json,application/json" hidden>
+    <button class="pill" id="cloudBtn" hidden>☁️ סנכרון בענן</button>
     <button class="pill" id="aiKeyBtn">🔑 הגדרת AI</button>
     <span class="small" id="footMsg"></span>
+    <div id="cloudBox" hidden style="width:100%;display:flex;flex-direction:column;gap:6px">
+      <span class="small" id="cloudInfo">התחבר כדי שהיומן יישמר בענן ויסתנכרן בין הטלפון למחשב. בפעם הראשונה לחץ "צור חשבון".</span>
+      <form id="cloudForm" style="display:flex;flex-direction:column;gap:6px">
+        <div class="add"><input id="cEmail" type="email" placeholder="אימייל" autocomplete="username"></div>
+        <div class="add"><input id="cPass" type="password" placeholder="סיסמה (לפחות 6 תווים)" autocomplete="current-password"></div>
+        <div class="gbar"><button class="pill primary" type="submit" id="cLogin">התחבר</button><button class="pill" type="button" id="cSignup">צור חשבון</button><button class="pill" type="button" id="cReset">שכחתי סיסמה</button></div>
+      </form>
+      <div class="gbar" id="cloudOut" hidden><button class="pill warn" type="button" id="cLogout">התנתק</button></div>
+    </div>
     <div id="aiKeyBox" hidden style="width:100%;display:flex;flex-direction:column;gap:6px">
       <span class="small">כדי להפעיל את עוזר ה־AI בחינם: היכנס ל־aistudio.google.com/apikey עם חשבון גוגל, לחץ Create API key והדבק אותו כאן. המפתח נשמר רק במכשיר הזה.</span>
       <div class="add"><input id="aiKey" type="password" placeholder="AIza…" autocomplete="off"><button id="aiKeySave">שמור</button></div>
@@ -734,6 +747,83 @@ document.getElementById('aiKeyBtn').onclick=()=>{const b=document.getElementById
 document.getElementById('aiKeySave').onclick=()=>{const k=document.getElementById('aiKey').value.trim();try{k?localStorage.setItem('sy-gemini-key',k):localStorage.removeItem('sy-gemini-key')}catch(e){}applyKey(k);document.getElementById('aiKeyBox').hidden=true;footMsg(k?'עוזר ה־AI הופעל ✓':'עוזר ה־AI כובה')};
 applyKey(savedKey);
 setSync('נשמר במכשיר הזה · עובד גם בלי אינטרנט');
+
+/* ---------- סנכרון בענן (Firebase) ---------- */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyACUbsp-PeofTZHQqN6ROpVgQWN7bmM9Lo",
+  authDomain: "super-yoman.firebaseapp.com",
+  projectId: "super-yoman",
+  storageBucket: "super-yoman.firebasestorage.app",
+  messagingSenderId: "576136404441",
+  appId: "1:576136404441:web:6f4b45832e3ae0314c4dc8"
+};
+let unsubCloud=null;
+async function cloudStart(col){
+  setSync('מתחבר לענן…');
+  const snap=await col.get();
+  const remote={};let rTT=null,rTB=null,rREC=null;
+  snap.docs.forEach(doc=>{
+    if(doc.id==='s-timetable'){try{rTT=JSON.parse(doc.data().json)}catch(e){}}
+    else if(doc.id==='s-tables'){try{rTB=JSON.parse(doc.data().json)}catch(e){}}
+    else if(doc.id==='s-recurring'){try{rREC=JSON.parse(doc.data().json)}catch(e){}}
+    else if(doc.id.startsWith('d'))remote[doc.id.slice(1)]=doc.data();
+  });
+  S.col=col;
+  if(rTT)S.tt=rTT;else saveExtra('tt');
+  if(rTB)S.tables=rTB;else if(S.tables.length)saveExtra('tb');
+  if(rREC)S.rec=rREC;else if(S.rec.length)saveExtra('rec');
+  const localOnly=Object.keys(S.days).filter(k=>!remote[k]);
+  S.days=Object.assign({},S.days,remote);
+  localOnly.forEach(k=>save(k));
+  try{localStorage.setItem('sy-days',JSON.stringify(S.days));localStorage.setItem('sy-extra',JSON.stringify({tt:S.tt,tables:S.tables,rec:S.rec}))}catch(e){}
+  setSync('מסונכרן לענן ✓');
+  safeRender();
+  unsubCloud=col.onSnapshot(sn=>{
+    let changed=false;
+    sn.docChanges().forEach(ch=>{
+      if(ch.doc.metadata.hasPendingWrites)return;
+      const id=ch.doc.id,gone=ch.type==='removed',data=gone?null:ch.doc.data();
+      try{
+        if(id==='s-timetable'&&data)S.tt=JSON.parse(data.json);
+        else if(id==='s-tables'&&data)S.tables=JSON.parse(data.json);
+        else if(id==='s-recurring'&&data)S.rec=JSON.parse(data.json);
+        else if(id.startsWith('d')){const k=id.slice(1);if(gone)delete S.days[k];else S.days[k]=data}
+        changed=true;
+      }catch(e){}
+    });
+    if(changed){try{localStorage.setItem('sy-days',JSON.stringify(S.days));localStorage.setItem('sy-extra',JSON.stringify({tt:S.tt,tables:S.tables,rec:S.rec}))}catch(e){}safeRender()}
+  },()=>setSync('אין חיבור לענן כרגע – נשמר במכשיר'));
+}
+function safeRender(){const a=document.activeElement;if(a&&(a.tagName==='TEXTAREA'||a.tagName==='INPUT')){refreshCal();return}renderAll();renderTab()}
+const authErr=e=>{const c=(e&&e.code)||'';return c.includes('invalid-credential')||c.includes('wrong-password')||c.includes('user-not-found')?'אימייל או סיסמה לא נכונים':c.includes('email-already-in-use')?'כבר יש חשבון עם האימייל הזה. לחץ "התחבר"':c.includes('weak-password')?'הסיסמה צריכה להיות לפחות 6 תווים':c.includes('invalid-email')?'האימייל לא תקין':c.includes('network')?'אין אינטרנט כרגע':c.includes('too-many')?'יותר מדי ניסיונות. נסה שוב בעוד כמה דקות':'משהו השתבש. נסה שוב'};
+if(FIREBASE_CONFIG&&window.firebase){
+  try{
+    firebase.initializeApp(FIREBASE_CONFIG);
+    const auth=firebase.auth(),fdb=firebase.firestore();
+    const $=id=>document.getElementById(id);
+    $('cloudBtn').hidden=false;
+    $('cloudBtn').onclick=()=>{$('cloudBox').hidden=!$('cloudBox').hidden};
+    const creds=()=>[$('cEmail').value.trim(),$('cPass').value];
+    $('cloudForm').addEventListener('submit',async e=>{e.preventDefault();const[em,pw]=creds();try{await auth.signInWithEmailAndPassword(em,pw)}catch(err){footMsg(authErr(err))}});
+    $('cSignup').onclick=async()=>{const[em,pw]=creds();try{await auth.createUserWithEmailAndPassword(em,pw)}catch(err){footMsg(authErr(err))}};
+    $('cReset').onclick=async()=>{const[em]=creds();if(!em){footMsg('כתוב קודם את האימייל');return}try{await auth.sendPasswordResetEmail(em);footMsg('נשלח אליך מייל לאיפוס סיסמה')}catch(err){footMsg(authErr(err))}};
+    $('cLogout').onclick=()=>auth.signOut();
+    auth.onAuthStateChanged(async user=>{
+      if(unsubCloud){unsubCloud();unsubCloud=null}
+      S.col=null;
+      $('cloudForm').hidden=!!user;$('cloudOut').hidden=!user;
+      if(user){
+        $('cloudInfo').textContent='מחובר כ־'+user.email+'. היומן נשמר בענן ומסתנכרן בכל מכשיר שתתחבר בו.';
+        $('cloudBtn').textContent='☁️ מחובר';$('cloudBox').hidden=true;
+        try{await cloudStart(fdb.collection('users').doc(user.uid).collection('data'));footMsg('')}catch(e){setSync('הסנכרון נכשל – נשמר במכשיר');footMsg('לא הצלחתי להתחבר לענן. בדוק את חוקי Firestore')}
+      }else{
+        $('cloudInfo').textContent='התחבר כדי שהיומן יישמר בענן ויסתנכרן בין הטלפון למחשב. בפעם הראשונה לחץ "צור חשבון".';
+        $('cloudBtn').textContent='☁️ סנכרון בענן';
+        setSync('נשמר במכשיר הזה · לא מחובר לענן');
+      }
+    });
+  }catch(e){console.error(e)}
+}
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script>
 </body>
